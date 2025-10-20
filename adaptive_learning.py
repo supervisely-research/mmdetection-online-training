@@ -20,27 +20,35 @@ class AdaptiveCocoDataset(CocoDataset):
         self.samples_per_stage = samples_per_stage
         self.current_sample_count = 0
         
-        # MMDetection already combines data_root + ann_file
-        # So kwargs['ann_file'] should already be the full path
-        self.full_ann_file = kwargs['ann_file']
+        # Build full path manually
+        data_root = kwargs.get('data_root', '')
+        ann_file = kwargs['ann_file']
         
-        # Create temporary ann_file for current samples
-        self.temp_ann_file = self.full_ann_file.replace('.json', '_adaptive_temp.json')
+        # Combine data_root and ann_file for full path
+        if data_root and not ann_file.startswith('/'):
+            self.full_ann_file = data_root + ann_file
+        else:
+            self.full_ann_file = ann_file
+        
+        print(f"DEBUG: Looking for annotation file at: {self.full_ann_file}")
+        
+        # Create temporary ann_file - RELATIVE path only (without data_root)
+        temp_ann_relative = ann_file.replace('.json', '_adaptive_temp.json')
+        self.temp_ann_file = data_root + temp_ann_relative
+        
+        print(f"DEBUG: Will create temp file at: {self.temp_ann_file}")
         
         # Load full dataset first
         with open(self.full_ann_file, 'r') as f:
             self.full_coco_data = json.load(f)
         
-        # Initialize with empty dataset
-        self._create_temp_annotation_file()
+        # Add first sample BEFORE calling super().__init__()
+        self.add_next_samples()
         
-        # Update kwargs to point to our temp file  
-        kwargs['ann_file'] = self.temp_ann_file
+        # Update kwargs to point to RELATIVE temp file path (MMDetection will add data_root)
+        kwargs['ann_file'] = temp_ann_relative
         
         super().__init__(**kwargs)
-        
-        # Add first sample
-        self.add_next_samples()
     
     def _create_temp_annotation_file(self):
         """Create temporary COCO annotation file with current samples"""
@@ -88,12 +96,13 @@ class AdaptiveCocoDataset(CocoDataset):
         # Update temporary annotation file
         self._create_temp_annotation_file()
         
-        # Reload dataset
-        self.coco = self.coco_api.COCO(self.temp_ann_file)
-        self.cat_ids = self.coco.get_cat_ids(cat_names=self.metainfo['classes'])
-        self.cat2label = {cat_id: i for i, cat_id in enumerate(self.cat_ids)}
-        self.img_ids = self.coco.get_img_ids()
-        self.data_list = self.load_data_list()
+        # Reload dataset if it's already initialized
+        if hasattr(self, 'coco'):
+            self.coco = self.coco_api.COCO(self.temp_ann_file)
+            self.cat_ids = self.coco.get_cat_ids(cat_names=self.metainfo['classes'])
+            self.cat2label = {cat_id: i for i, cat_id in enumerate(self.cat_ids)}
+            self.img_ids = self.coco.get_img_ids()
+            self.data_list = self.load_data_list()
         
         print(f"Added samples. Current count: {self.current_sample_count}/{self.max_samples}")
         return True
@@ -101,6 +110,18 @@ class AdaptiveCocoDataset(CocoDataset):
     def get_current_sample_count(self):
         """Return current number of samples in dataset"""
         return self.current_sample_count
+    def load_data_list(self):
+        """Load annotations and add text prompts for GroundingDINO"""
+        data_list = super().load_data_list()
+        
+        class_names = self.metainfo['classes']
+        text_prompt = '. '.join(class_names) + '.' 
+        
+        for data_info in data_list:
+            data_info['text'] = text_prompt
+            data_info['custom_entities'] = True
+            
+        return data_list
 
 
 @HOOKS.register_module()
@@ -160,10 +181,11 @@ class AdaptiveLearningHook(Hook):
     def _save_adaptive_checkpoint(self, runner, sample_count):
         """Save checkpoint with adaptive learning info"""
         checkpoint_name = f"epoch_{runner.epoch}_samples_{sample_count}.pth"
-        checkpoint_path = osp.join(runner.work_dir, checkpoint_name)
         
+        # Correct API call for save_checkpoint
         runner.save_checkpoint(
-            checkpoint_path,
+            runner.work_dir,
+            checkpoint_name,
             save_optimizer=True,
             save_param_scheduler=True
         )
@@ -181,3 +203,5 @@ class AdaptiveLearningHook(Hook):
                 current_samples, 
                 runner.epoch
             )
+        
+    
