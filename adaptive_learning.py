@@ -110,6 +110,7 @@ class AdaptiveCocoDataset(CocoDataset):
     def get_current_sample_count(self):
         """Return current number of samples in dataset"""
         return self.current_sample_count
+    
     def load_data_list(self):
         """Load annotations and add text prompts for GroundingDINO"""
         data_list = super().load_data_list()
